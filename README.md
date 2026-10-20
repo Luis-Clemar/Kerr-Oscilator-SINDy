@@ -1,1 +1,1 @@
-# Kerr-Oscilator-SINDy
+# Kerr-Oscillator-SINDy
