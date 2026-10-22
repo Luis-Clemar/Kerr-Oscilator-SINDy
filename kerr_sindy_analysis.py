@@ -4,14 +4,16 @@
 
 The centroid alpha = <a> obeys an exact equation that depends on three central correlations
 of the state: n_c = <da^dag da>, m_c = <da da> and s_c = <da^dag da da>, with da = a - alpha.
-SINDy recovers this equation from simulated data, and the identified model is integrated
-with the correlations taken from the simulation.
+SINDy recovers this equation from simulated data using a generic library of 25 candidate functions,
+a threshold sweep and the elbow of the Pareto front (which includes the empty model). The identified
+model is integrated with the correlations taken from the simulation.
 
 Figures (saved in ./figures):
     energy_surface.png              classical energy surface of the central region
     phase_space_initial_states.png  classical energy contours and the reference initial states
     sindy_reconstruction.png        reconstruction of <q> and <p> for state A (right well)
     reference_trajectories.png      reconstruction for states B and C (near the separatrix)
+    pareto_front.png                Pareto front and elbow selection for states A, B and C
 """
 import os
 import numpy as np
@@ -29,17 +31,20 @@ STATES = {"Right well": (1.8 + 0.5j, "1.8+0.5i"),              # reference initi
           "Hyperbolic point": (1j * np.sqrt(1.5), r"i\sqrt{1.5}")}
 N = 100                                                        # Fock space dimension
 dt, t_final, t_train = 5e-4, 10.0, 2.0
-lam = 0.1                                                      # STLSQ threshold
+lams = np.logspace(-12, 1, 300)                                # threshold sweep
 t = np.arange(0, t_final + dt / 2, dt)
 ts = t[::2]                                                    # time grid of the integrated model
-names = ["1", "a", "a*", "a^2", "a*^2", "|a|^2", "|a|^2 a", "a n_c", "a* m_c", "s_c"]
+names = ["1", "a", "a*", "a^2", "|a|^2", "a*^2", "a^3", "|a|^2 a", "|a|^2 a*", "a*^3"] + [
+    f"{f}{c}" for f in ["", "a ", "a* "] for c in ["n_c", "m_c", "m_c*", "s_c", "s_c*"]]
 COLORS = {"O": "crimson", "A": "teal", "B": "forestgreen", "C": "darkviolet"}   # one color per reference state
 
 
 def library(z, n, m, s):
-    """Candidate functions (works for arrays and scalars)."""
-    zc, r = np.conj(z), np.abs(z)**2
-    return np.stack([np.ones_like(z), z, zc, z**2, zc**2, r + 0 * z, r * z, z * n, zc * m, s], axis=-1)
+    """Monomials in a, a* up to degree 3 and products of {1, a, a*} with the correlations."""
+    zc, o = np.conj(z), np.ones_like(z)
+    mono = [o, z, zc, z**2, z * zc, zc**2, z**3, z**2 * zc, z * zc**2, zc**3]
+    corr = [n + 0 * z, m, np.conj(m), s, np.conj(s)]
+    return np.stack(mono + [f * c for f in [o, z, zc] for c in corr], axis=-1)
 
 
 def energy(z):
@@ -62,17 +67,33 @@ def simulate(alpha0):
     return al, n - abs(al)**2, m - al**2, s - 2 * al * n - al.conj() * m + 2 * abs(al)**2 * al
 
 
-def sindy(al, n_c, m_c, s_c):
-    """Fourth-order finite differences + STLSQ on the training window."""
-    dal = (al[:-4] - 8 * al[1:-3] + 8 * al[3:-1] - al[4:]) / (12 * dt)
-    tr = slice(0, int(t_train / dt))
-    Theta = library(al, n_c, m_c, s_c)[2:-2][tr]
-    xi = np.linalg.lstsq(Theta, dal[tr], rcond=None)[0]
+def stlsq(Theta, y, lam):
+    """Sequentially thresholded least squares."""
+    xi = np.linalg.lstsq(Theta, y, rcond=None)[0]
     for _ in range(25):
         on = np.abs(xi) >= lam
         xi[~on] = 0
-        xi[on] = np.linalg.lstsq(Theta[:, on], dal[tr], rcond=None)[0]
+        if on.any():
+            xi[on] = np.linalg.lstsq(Theta[:, on], y, rcond=None)[0]
     return xi
+
+
+def sindy(al, n_c, m_c, s_c):
+    """Threshold sweep, Pareto front with the empty model, and elbow selection.
+    Returns the selected coefficients, the front {k: MSE} and the selected number of terms."""
+    y = ((al[:-4] - 8 * al[1:-3] + 8 * al[3:-1] - al[4:]) / (12 * dt))[:int(t_train / dt)]
+    Theta = library(al, n_c, m_c, s_c)[2:-2][:int(t_train / dt)]
+    front = {0: (np.mean(np.abs(y)**2), np.zeros(Theta.shape[1], complex))}   # empty model
+    for lam in lams:
+        xi = stlsq(Theta, y, lam)
+        k, mse = int((xi != 0).sum()), np.mean(np.abs(y - Theta @ xi)**2)
+        if k and (k not in front or mse < front[k][0]):
+            front[k] = (mse, xi)
+    ks = np.array(sorted(front))
+    lm = np.log10([front[k][0] for k in ks])
+    x, y_ = (ks - ks[0]) / (ks[-1] - ks[0]), (lm - lm[0]) / (lm[-1] - lm[0])
+    elbow = int(ks[np.argmax(np.abs(x[-1] * y_ - y_[-1] * x))])        # farthest point from the secant
+    return front[elbow][1], {int(k): front[k][0] for k in ks}, elbow
 
 
 def integrate(xi, z0, n_c, m_c, s_c):
@@ -165,16 +186,15 @@ if __name__ == "__main__":
     plot_phase_space()
 
     # Reference states: identification, reconstruction and mean field (correlations set to zero)
-    runs = {}
+    runs, fronts = {}, {}
     for tag, (name, (alpha0, _)) in zip("ABC", STATES.items()):
         al, n_c, m_c, s_c = simulate(alpha0)
-        xi = sindy(al, n_c, m_c, s_c)
+        xi, fronts[tag], k_opt = sindy(al, n_c, m_c, s_c)
         runs[tag] = (al, integrate(xi, al[0], n_c, m_c, s_c), integrate(xi, al[0], 0 * n_c, 0 * m_c, 0 * s_c))
-        if tag == "A":
-            print(f"Identified model ({name}): d<a>/dt =")
-            for nm, c in zip(names, xi):
-                if c != 0:
-                    print(f"  ({c.real:+.6f} {c.imag:+.6f}i) {nm}")
+        print(f"Identified model, state {tag} ({name}), {k_opt} terms: d<a>/dt =")
+        for nm, c in zip(names, xi):
+            if c != 0:
+                print(f"  ({c.real:+.6f} {c.imag:+.6f}i) {nm}")
 
     q_of = lambda z: np.sqrt(2) * z.real                       # centroid quadratures
     p_of = lambda z: np.sqrt(2) * z.imag
@@ -212,4 +232,17 @@ if __name__ == "__main__":
     ax[0, 0].set_ylabel(r"$\langle q\rangle$")
     ax[1, 0].set_ylabel(r"$|\hat{\alpha}-\alpha|$")
     fig.savefig("figures/reference_trajectories.png")
+
+    # Pareto fronts: MSE versus number of terms; the circle marks the elbow (selected model)
+    fig, ax = plt.subplots(1, 3, figsize=(7.2, 2.6), sharey=True, layout="constrained")
+    for a, (tag, front), letter in zip(ax, fronts.items(), "abc"):
+        ks, mse = np.array(list(front)), np.array(list(front.values()))
+        a.semilogy(ks, mse, "o-", color=COLORS[tag], ms=3.5, lw=0.9, mec="w", mew=0.4)
+        a.semilogy([ks[0], ks[-1]], [mse[0], mse[-1]], ":", color="0.5", lw=0.8)
+        k_sel = ks[np.argmax(np.abs((ks - ks[0]) / (ks[-1] - ks[0]) * (np.log10(mse[-1]) - np.log10(mse[0]))
+                                    - (np.log10(mse) - np.log10(mse[0]))))]
+        a.plot(k_sel, front[k_sel], "o", ms=9, mfc="none", mec="k", mew=1.0)
+        a.set(xlabel=r"$k$", title=f"({letter})", xlim=(-1, 26), xticks=[0, 5, 10, 15, 20, 25])
+    ax[0].set_ylabel("MSE")
+    fig.savefig("figures/pareto_front.png")
     plt.show()
