@@ -11,8 +11,10 @@ model is integrated with the correlations taken from the simulation.
 Figures (saved in ./figures):
     energy_surface.png              classical energy surface of the central region
     phase_space_initial_states.png  classical energy contours and the reference initial states
+    initial_state_energies.png      energy profiles along the q and p axes with the energy of each initial state
     sindy_reconstruction.png        reconstruction of <q> and <p> for state A (right well)
     reference_trajectories.png      reconstruction for states B and C (near the separatrix)
+    phase_space_trajectories.png    centroid trajectories (<q>, <p>) for states A, B and C
     pareto_front.png                Pareto front and elbow selection for states A, B and C
 """
 import os
@@ -180,6 +182,25 @@ def plot_phase_space():
                  shrink=0.9, aspect=35, pad=0.02)
     fig.savefig("figures/phase_space_initial_states.png")
 
+    # Energy profiles along the q axis (p = 0) and the p axis (q = 0) with the energy of states A, B and C
+    fig, ax = plt.subplots(1, 2, figsize=(7.2, 2.9), layout="constrained")
+    x = np.linspace(-6, 6, 1200)
+    profiles = [(energy(x / np.sqrt(2)), r"$q$", (-60, 10), (-6, 6), [-6, -3, 0, 3, 6]),
+                (energy(1j * x / np.sqrt(2)), r"$p$", (-4, 2), (-3, 3), [-3, -2, -1, 0, 1, 2, 3])]
+    for a, (prof, lab, ylim, xlim, xt), letter in zip(ax, profiles, "ab"):
+        a.plot(x, prof, color="k", lw=1.4)
+        for tag in "ABC":
+            e = energy(points[tag])
+            if ylim[0] < e < ylim[1]:
+                a.axhline(e, color=COLORS[tag], ls="--", lw=1.0, label=rf"{tag} ($E={e:.2f}$)")
+        a.set(xlabel=lab, ylim=ylim, xlim=xlim, xticks=xt, title=f"({letter})")
+        a.legend(loc="lower center" if letter == "a" else "upper center", fontsize=7, frameon=False)
+    ax[0].set_ylabel(r"$E$")
+    fig.savefig("figures/initial_state_energies.png")
+    for tag in "ABC":
+        z0 = points[tag]
+        print(f"Energy of state {tag}: E = {energy(z0):.2f}")
+
 
 if __name__ == "__main__":
     os.makedirs("figures", exist_ok=True)
@@ -232,6 +253,28 @@ if __name__ == "__main__":
     ax[0, 0].set_ylabel(r"$\langle q\rangle$")
     ax[1, 0].set_ylabel(r"$|\hat{\alpha}-\alpha|$")
     fig.savefig("figures/reference_trajectories.png")
+
+    # Centroid trajectories in phase space: quantum evolution (color) and SINDy (dashed, up to its
+    # prediction horizon, marked with a cross) for A, B and C
+    E_c = -(DELTA - 2 * eps2)**2 / (4 * K)
+    Q, P = np.meshgrid(np.linspace(-6, 6, 500), np.linspace(-4, 4, 400))
+    Eqp = energy((Q + 1j * P) / np.sqrt(2))
+    fig, ax = plt.subplots(1, 3, figsize=(7.2, 2.7), layout="constrained")
+    for a, tag, letter in zip(ax, "ABC", "abc"):
+        al, z, _ = runs[tag]
+        a.contour(Q, P, Eqp, levels=[E_c], colors="0.6", linestyles="solid", linewidths=0.7)
+        a.plot(q_of(al), p_of(al), color=COLORS[tag], lw=0.9)
+        err = np.abs(z - al[::2]) / np.abs(al).max()
+        n = np.argmax(err > 1e-2) if (err > 1e-2).any() else len(z)     # SINDy shown up to its horizon t*
+        a.plot(q_of(z[:n]), p_of(z[:n]), "--", color="k", lw=0.6)
+        if n < len(z):
+            a.plot(q_of(z[n - 1]), p_of(z[n - 1]), "x", color="k", ms=5, mew=1.0, zorder=6)
+        a.plot(q_of(al[0]), p_of(al[0]), "o", color=COLORS[tag], mec="w", mew=0.9, ms=6.5, zorder=7)   # initial state
+        lim = max(np.abs(q_of(al)).max(), np.abs(p_of(al)).max()) * 1.15
+        a.set(xlabel=r"$\langle q\rangle$", title=f"({letter})", aspect="equal",
+              xlim=(-lim, lim) if tag != "A" else (1.5, 5.0), ylim=(-lim, lim) if tag != "A" else (-1.75, 1.75))
+    ax[0].set_ylabel(r"$\langle p\rangle$")
+    fig.savefig("figures/phase_space_trajectories.png")
 
     # Pareto fronts: MSE versus number of terms; the circle marks the elbow (selected model)
     fig, ax = plt.subplots(1, 3, figsize=(7.2, 2.6), sharey=True, layout="constrained")
